@@ -6,10 +6,14 @@
 (define-constant ERR_INSUFFICIENT_BALANCE (err u104))
 (define-constant ERR_CHARITY_NOT_ACTIVE (err u105))
 (define-constant ERR_SELF_DONATION (err u106))
+(define-constant ERR_GOAL_NOT_FOUND (err u107))
+(define-constant ERR_GOAL_EXPIRED (err u108))
+(define-constant ERR_GOAL_ALREADY_ACHIEVED (err u109))
 
 (define-data-var charity-counter uint u0)
 (define-data-var donation-counter uint u0)
 (define-data-var total-donations uint u0)
+(define-data-var goal-counter uint u0)
 
 (define-map charities
     { charity-id: uint }
@@ -65,6 +69,34 @@
 )
 
 (define-map withdrawal-counters
+    { charity-id: uint }
+    { count: uint }
+)
+
+(define-map charity-goals
+    { goal-id: uint }
+    {
+        charity-id: uint,
+        title: (string-ascii 100),
+        description: (string-ascii 300),
+        target-amount: uint,
+        deadline-block: uint,
+        current-amount: uint,
+        created-block: uint,
+        is-active: bool,
+        achieved-block: (optional uint),
+    }
+)
+
+(define-map charity-goal-list
+    {
+        charity-id: uint,
+        goal-index: uint,
+    }
+    { goal-id: uint }
+)
+
+(define-map charity-goal-counts
     { charity-id: uint }
     { count: uint }
 )
@@ -244,6 +276,99 @@
                 name: name,
                 description: description,
                 category: category,
+            })
+        )
+        (ok true)
+    )
+)
+
+(define-public (create-charity-goal
+        (charity-id uint)
+        (title (string-ascii 100))
+        (description (string-ascii 300))
+        (target-amount uint)
+        (deadline-block uint)
+    )
+    (let (
+            (charity (unwrap! (map-get? charities { charity-id: charity-id })
+                ERR_CHARITY_NOT_FOUND
+            ))
+            (goal-id (+ (var-get goal-counter) u1))
+            (current-block stacks-block-height)
+            (goal-count (default-to u0
+                (get count
+                    (map-get? charity-goal-counts { charity-id: charity-id })
+                )))
+        )
+        (asserts! (is-eq tx-sender (get wallet charity)) ERR_NOT_AUTHORIZED)
+        (asserts! (> target-amount u0) ERR_INVALID_AMOUNT)
+        (asserts! (> deadline-block current-block) ERR_INVALID_AMOUNT)
+        (asserts! (> (len title) u0) ERR_INVALID_AMOUNT)
+        (asserts! (get is-active charity) ERR_CHARITY_NOT_ACTIVE)
+
+        (map-set charity-goals { goal-id: goal-id } {
+            charity-id: charity-id,
+            title: title,
+            description: description,
+            target-amount: target-amount,
+            deadline-block: deadline-block,
+            current-amount: u0,
+            created-block: current-block,
+            is-active: true,
+            achieved-block: none,
+        })
+
+        (map-set charity-goal-list {
+            charity-id: charity-id,
+            goal-index: goal-count,
+        } { goal-id: goal-id }
+        )
+
+        (map-set charity-goal-counts { charity-id: charity-id } { count: (+ goal-count u1) })
+
+        (var-set goal-counter goal-id)
+        (ok goal-id)
+    )
+)
+
+(define-public (deactivate-charity-goal (goal-id uint))
+    (let (
+            (goal (unwrap! (map-get? charity-goals { goal-id: goal-id })
+                ERR_GOAL_NOT_FOUND
+            ))
+            (charity (unwrap! (map-get? charities { charity-id: (get charity-id goal) })
+                ERR_CHARITY_NOT_FOUND
+            ))
+        )
+        (asserts! (is-eq tx-sender (get wallet charity)) ERR_NOT_AUTHORIZED)
+        (map-set charity-goals { goal-id: goal-id }
+            (merge goal { is-active: false })
+        )
+        (ok true)
+    )
+)
+
+(define-public (update-charity-goal
+        (goal-id uint)
+        (title (string-ascii 100))
+        (description (string-ascii 300))
+    )
+    (let (
+            (goal (unwrap! (map-get? charity-goals { goal-id: goal-id })
+                ERR_GOAL_NOT_FOUND
+            ))
+            (charity (unwrap! (map-get? charities { charity-id: (get charity-id goal) })
+                ERR_CHARITY_NOT_FOUND
+            ))
+        )
+        (asserts! (is-eq tx-sender (get wallet charity)) ERR_NOT_AUTHORIZED)
+        (asserts! (get is-active goal) ERR_GOAL_NOT_FOUND)
+        (asserts! (is-none (get achieved-block goal)) ERR_GOAL_ALREADY_ACHIEVED)
+        (asserts! (> (len title) u0) ERR_INVALID_AMOUNT)
+        (map-set charity-goals { goal-id: goal-id }
+            (merge goal {
+                title: title,
+                description: description,
             })
         )
         (ok true)
@@ -570,6 +695,93 @@
             )
         )
     )
+)
+
+(define-public (update-goal-progress
+        (goal-id uint)
+        (new-amount uint)
+    )
+    (let (
+            (goal (unwrap! (map-get? charity-goals { goal-id: goal-id })
+                ERR_GOAL_NOT_FOUND
+            ))
+            (charity (unwrap! (map-get? charities { charity-id: (get charity-id goal) })
+                ERR_CHARITY_NOT_FOUND
+            ))
+            (current-block stacks-block-height)
+        )
+        (asserts! (is-eq tx-sender (get wallet charity)) ERR_NOT_AUTHORIZED)
+        (asserts! (get is-active goal) ERR_GOAL_NOT_FOUND)
+        (asserts! (> (get deadline-block goal) current-block) ERR_GOAL_EXPIRED)
+        (map-set charity-goals { goal-id: goal-id }
+            (merge goal {
+                current-amount: new-amount,
+                achieved-block: (if (>= new-amount (get target-amount goal))
+                    (some current-block)
+                    none
+                ),
+            })
+        )
+        (ok true)
+    )
+)
+
+(define-read-only (get-charity-goal (goal-id uint))
+    (ok (map-get? charity-goals { goal-id: goal-id }))
+)
+
+(define-read-only (get-charity-goals (charity-id uint))
+    (let ((goal-count (default-to u0
+            (get count (map-get? charity-goal-counts { charity-id: charity-id }))
+        )))
+        (ok {
+            charity-id: charity-id,
+            total-goals: goal-count,
+        })
+    )
+)
+
+(define-read-only (get-goal-progress (goal-id uint))
+    (match (map-get? charity-goals { goal-id: goal-id })
+        goal (let ((progress-percentage (if (> (get target-amount goal) u0)
+                (/ (* (get current-amount goal) u100) (get target-amount goal))
+                u0
+            )))
+            (ok {
+                goal-id: goal-id,
+                title: (get title goal),
+                current-amount: (get current-amount goal),
+                target-amount: (get target-amount goal),
+                progress-percentage: progress-percentage,
+                is-achieved: (is-some (get achieved-block goal)),
+                is-active: (get is-active goal),
+                deadline-block: (get deadline-block goal),
+                blocks-remaining: (if (> (get deadline-block goal) stacks-block-height)
+                    (- (get deadline-block goal) stacks-block-height)
+                    u0
+                ),
+                is-expired: (<= (get deadline-block goal) stacks-block-height),
+            })
+        )
+        ERR_GOAL_NOT_FOUND
+    )
+)
+
+(define-read-only (get-charity-goal-by-index
+        (charity-id uint)
+        (goal-index uint)
+    )
+    (match (map-get? charity-goal-list {
+        charity-id: charity-id,
+        goal-index: goal-index,
+    })
+        goal-ref (ok (some (get goal-id goal-ref)))
+        (ok none)
+    )
+)
+
+(define-read-only (get-total-goals)
+    (ok (var-get goal-counter))
 )
 
 (define-read-only (get-block-info)
