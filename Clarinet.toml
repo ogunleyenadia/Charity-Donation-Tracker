@@ -9,6 +9,11 @@ path = "contracts/charity-donation-tracker.clar"
 clarity_version = 3
 epoch = 3.0
 
+[contracts.donor-profiles]
+path = "contracts/donor-profiles.clar"
+clarity_version = 3
+epoch = 3.0
+
 [repl]
 costs_version = 3
 parser_version = 2
